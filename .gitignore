@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+movies
+trajectory_plots
+notes.txt
+# datasets/TartanAir
+
+
 # Distribution / packaging
 .Python
 build/
@@ -159,5 +165,7 @@ rsync*
 models/*
 datasets/TartanAir.pickle
 datasets/TartanAir
+datasets/mono
 TartanAirResults
 thirdparty/*
+saved_trajectories

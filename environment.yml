@@ -1,8 +1,8 @@
-name: dpvo
+name: dpvo118
 channels:
-  - pyg
   - pytorch
   - nvidia
+  - pyg
   - conda-forge
   - defaults
 dependencies:
@@ -10,7 +10,7 @@ dependencies:
   - python=3.10
   - pytorch=2.3.1
   - pytorch-scatter=2.1.2
-  - pytorch-cuda=12.1
+  - pytorch-cuda=11.8
   - torchvision=0.18
   - pip:
     - tensorboard
@@ -24,3 +24,11 @@ dependencies:
     - evo
     - opencv-python
     - yacs
+
+## conda install -c conda-forge "gcc_linux-64=11.*" "gxx_linux-64=11.*"
+## conda install nvidia/label/cuda-11.8.0::cuda-toolkit
+## conda install nvidia/label/cuda-11.8.0::cuda-nvcc
+## export CUDA_HOME="$CONDA_PREFIX"
+# (sdpvo) user@user:~/Desktop/S_DPVO_updated-1$ export PATH="$CUDA_HOME/bin:$PATH"
+# (sdpvo) user@user:~/Desktop/S_DPVO_updated-1$ export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
+# (sdpvo) user@user:~/Desktop/S_DPVO_updated-1$ echo "CUDA_HOME=$CUDA_HOME"
