@@ -5,6 +5,7 @@ import torch
 from ..lietorch import SE3
 
 from scipy.spatial.transform import Rotation
+from dpvo import projective_ops as pops
 
 def parse_list(filepath, skiprows=0):
     """ read list data """

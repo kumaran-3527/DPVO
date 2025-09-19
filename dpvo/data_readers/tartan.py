@@ -72,8 +72,14 @@ class TartanAir(RGBDDataset):
         scene_info = {}
         scenes = glob.glob(osp.join(self.root, '*/*/*/*'))
         for scene in tqdm(sorted(scenes)):
+            
             images = sorted(glob.glob(osp.join(scene, 'image_left/*.png')))
-            depths = sorted(glob.glob(osp.join(scene, 'depth_left/*.npy')))
+            # collect depth files: support both .npy and .png
+            depth_npy = sorted(glob.glob(osp.join(scene, 'depth_left/*.npy')))
+            depth_png = sorted(glob.glob(osp.join(scene, 'depth_left/*.png')))
+            if depth_npy and depth_png:
+                raise RuntimeError(f"Both .npy and .png depth files found in {scene}; expected only one format")
+            depths = depth_npy if depth_npy else depth_png
 
             if len(images) != len(depths):
                 continue
@@ -102,9 +108,21 @@ class TartanAir(RGBDDataset):
 
     @staticmethod
     def depth_read(depth_file):
-        depth = np.load(depth_file) / TartanAir.DEPTH_SCALE
-        depth[depth==np.nan] = 1.0
-        depth[depth==np.inf] = 1.0
-        return depth
+
+        if not osp.exists(depth_file):
+            print("Depth file not found: {}".format(depth_file))
+            return None
+        
+        if depth_file.endswith('.npy'):    
+            depth = np.load(depth_file) / TartanAir.DEPTH_SCALE
+            depth = np.nan_to_num(depth, nan=1.0, posinf=1.0, neginf=1.0)
+            return depth.astype(np.float32, copy=False)
+        
+        if depth_file.endswith('.png'):
+
+            depth_rgba = cv2.imread(depth_file, cv2.IMREAD_UNCHANGED)
+            depth = depth_rgba.view("<f4")
+            depth = np.squeeze(depth, axis=-1)
+            return depth.astype(np.float32, copy=False)
 
 
