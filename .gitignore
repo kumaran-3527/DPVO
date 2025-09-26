@@ -169,3 +169,4 @@ datasets/mono
 TartanAirResults
 thirdparty/*
 saved_trajectories
+dinov2-models
