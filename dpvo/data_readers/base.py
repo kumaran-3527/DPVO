@@ -16,6 +16,8 @@ from .augmentation import RGBDAugmentor
 from .rgbd_utils import *
 
 class RGBDDataset(data.Dataset):
+
+    DEPTH_SCALE = 5.0
     def __init__(self, name, datapath, n_frames=4, crop_size=[480,640], fmin=10.0, fmax=75.0, aug=True, sample=True):
         """ Base class for RGBD dataset """
         self.aug = None
@@ -59,7 +61,22 @@ class RGBDDataset(data.Dataset):
 
     @staticmethod
     def depth_read(depth_file):
-        return np.load(depth_file)
+
+        if not osp.exists(depth_file):
+            print("Depth file not found: {}".format(depth_file))
+            return None
+        
+        if depth_file.endswith('.npy'):    
+            depth = np.load(depth_file) / RGBDDataset.DEPTH_SCALE
+            depth = np.nan_to_num(depth, nan=1.0, posinf=1.0, neginf=1.0)
+            return depth.astype(np.float32, copy=False)
+        
+        if depth_file.endswith('.png'):
+
+            depth_rgba = cv2.imread(depth_file, cv2.IMREAD_UNCHANGED)
+            depth = depth_rgba.view("<f4")
+            depth = np.squeeze(depth, axis=-1)
+            return depth.astype(np.float32, copy=False)
 
     def build_frame_graph(self, poses, depths, intrinsics, f=16, max_flow=256):
         """ compute optical flow distance between all pairs of frames """

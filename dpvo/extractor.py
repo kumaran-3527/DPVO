@@ -262,3 +262,23 @@ class BasicEncoder4(nn.Module):
 
         _, c2, h2, w2 = x.shape
         return x.view(b, n, c2, h2, w2)
+
+
+if __name__ == "__main__":
+    model = BasicEncoder4().cuda()
+
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing =True)
+    x = torch.randn(1, 2, 3, 480, 640).cuda()
+    start.record()
+    with torch.no_grad():
+        y = model(x)
+    end.record()
+    print(y.shape)  # (1, 2, 128, 60, 80)
+    torch.cuda.synchronize()
+    print(f"Inference time: {start.elapsed_time(end)} ms")
+"""
+torch.Size([1, 1, 128, 120, 160])
+Inference time: 105.47756958007812 ms
+
+"""

@@ -271,3 +271,140 @@ class VONet(nn.Module):
 
         return traj
 
+
+    # @autocast(enabled=False)
+    # def forward_deferred_ba(self, images, poses, disps, intrinsics, M=1024, STEPS=12, P=1, structure_only=False, rescale=False, final_ep=20):
+    #     """Like forward(), but defers bundle adjustment until the end.
+
+    #     Steps:
+    #     - Run STEPS of correlation/update to produce per-edge target and weight.
+    #     - Accumulate constraints from each step without calling BA inside the loop.
+    #     - Run a single BA over all accumulated constraints.
+    #     - Return a trajectory list similar to forward(), plus a final post-BA entry.
+
+    #     Returns:
+    #         traj: list of tuples (valid, coords, coords_gt, Gs[:, :n], Ps[:, :n], kl)
+    #               One tuple per step (pre-BA), and one final post-BA tuple appended at the end.
+    #     """
+
+    #     # Preprocess inputs (same as forward)
+    #     images = 2 * (images / 255.0) - 0.5
+    #     intrinsics = intrinsics / 4.0
+    #     disps = disps[:, :, 1::4, 1::4].float()
+
+    #     fmap, gmap, imap, patches, ix = self.patchify(images, disps=disps)
+    #     corr_fn = CorrBlock(fmap, gmap)
+
+    #     b, N, c, h, w = fmap.shape
+    #     p = self.P
+
+    #     patches_gt = patches.clone()
+    #     Ps = poses
+
+    #     # Initialize patch depths with random values at center pixel
+    #     d = patches[..., 2, p//2, p//2]
+    #     patches = set_depth(patches, torch.rand_like(d))
+
+    #     # Build initial edge set over first 8 frames
+    #     kk, jj = flatmeshgrid(torch.where(ix < 8)[0], torch.arange(0, 8, device="cuda"), indexing='ij')
+    #     ii = ix[kk]
+
+    #     # Feature/hidden states for update
+    #     imap = imap.view(b, -1, DIM)
+    #     net = torch.zeros(b, len(kk), DIM, device="cuda", dtype=torch.float)
+
+    #     # Initialize poses
+    #     Gs = SE3.IdentityLike(poses)
+    #     if structure_only:
+    #         Gs.data[:] = poses.data[:]
+
+    #     # Accumulators for a single BA at the end
+    #     ii_list, jj_list, kk_list = [], [], []
+    #     target_list, weight_list = [], []
+
+    #     traj = []
+    #     bounds = [-64, -64, w + 64, h + 64]
+
+    #     # Main iterative loop without BA
+    #     while len(traj) < STEPS:
+    #         # Detach to avoid building huge graphs
+    #         Gs = Gs.detach()
+    #         patches = patches.detach()
+
+    #         # Possibly introduce a new frame (same logic as forward)
+    #         n = ii.max() + 1
+    #         if len(traj) >= 8 and n < images.shape[1]:
+    #             if not structure_only:
+    #                 Gs.data[:, n] = Gs.data[:, n - 1]
+    #             kk1, jj1 = flatmeshgrid(torch.where(ix < n)[0], torch.arange(n, n + 1, device="cuda"), indexing='ij')
+    #             kk2, jj2 = flatmeshgrid(torch.where(ix == n)[0], torch.arange(0, n + 1, device="cuda"), indexing='ij')
+
+    #             ii = torch.cat([ix[kk1], ix[kk2], ii])
+    #             jj = torch.cat([jj1, jj2, jj])
+    #             kk = torch.cat([kk1, kk2, kk])
+
+    #             net1 = torch.zeros(b, len(kk1) + len(kk2), DIM, device="cuda")
+    #             net = torch.cat([net1, net], dim=1)
+
+    #             if np.random.rand() < 0.1:
+    #                 k = (ii != (n - 4)) & (jj != (n - 4))
+    #                 ii = ii[k]
+    #                 jj = jj[k]
+    #                 kk = kk[k]
+    #                 net = net[:, k]
+
+    #             # Initialize depths for patches in the new frame from median of previous frames
+    #             patches[:, ix == n, 2] = torch.median(patches[:, (ix == n - 1) | (ix == n - 2), 2])
+    #             n = ii.max() + 1
+
+    #         # Predict correspondences and residual corrections
+    #         coords = pops.transform(Gs, patches, intrinsics, ii, jj, kk)
+    #         coords1 = coords.permute(0, 1, 4, 2, 3).contiguous()
+
+    #         corr = corr_fn(kk, jj, coords1)
+    #         net, (delta, weight, _) = self.update(net, imap[:, kk], corr, None, ii, jj, kk)
+
+    #         # Accumulate constraints for final BA
+    #         lmbda = 1e-4
+    #         target = coords[..., p // 2, p // 2, :] + delta
+
+    #         ii_list.append(ii.clone())
+    #         jj_list.append(jj.clone())
+    #         kk_list.append(kk.clone())
+    #         target_list.append(target)
+    #         weight_list.append(weight)
+
+    #         # For logging/compatibility, compute the same per-step traj tuple (pre-BA)
+    #         kl = torch.as_tensor(0)
+    #         dij = (ii - jj).abs()
+    #         k = (dij > 0) & (dij <= 2)
+
+    #         coords_log = pops.transform(Gs, patches, intrinsics, ii[k], jj[k], kk[k])
+    #         coords_gt_log, valid_log, _ = pops.transform(Ps, patches_gt, intrinsics, ii[k], jj[k], kk[k], jacobian=True)
+
+    #         traj.append((valid_log, coords_log, coords_gt_log, Gs[:, :n], Ps[:, :n], kl))
+
+    #     # Run a single BA at the end over all accumulated constraints
+    #     ii_cat = torch.cat(ii_list, dim=0) if len(ii_list) > 0 else ii
+    #     jj_cat = torch.cat(jj_list, dim=0) if len(jj_list) > 0 else jj
+    #     kk_cat = torch.cat(kk_list, dim=0) if len(kk_list) > 0 else kk
+    #     target_cat = torch.cat(target_list, dim=1) if len(target_list) > 0 else target
+    #     weight_cat = torch.cat(weight_list, dim=1) if len(weight_list) > 0 else weight
+
+    #     # Do one bigger BA to refine Gs and structure
+    #     Gs, patches = BA(Gs, patches, intrinsics, target_cat, weight_cat, lmbda,
+    #                      ii_cat, jj_cat, kk_cat, bounds, ep=final_ep, fixedp=1,
+    #                      structure_only=structure_only)
+
+    #     # Append a final post-BA trajectory entry for convenience
+    #     final_n = int(ii_cat.max().item()) + 1 if ii_cat.numel() > 0 else int(ii.max().item()) + 1
+    #     dij = (ii_cat - jj_cat).abs()
+    #     k = (dij > 0) & (dij <= 2)
+
+    #     coords_final = pops.transform(Gs, patches, intrinsics, ii_cat[k], jj_cat[k], kk_cat[k])
+    #     coords_gt_final, valid_final, _ = pops.transform(Ps, patches_gt, intrinsics, ii_cat[k], jj_cat[k], kk_cat[k], jacobian=True)
+
+    #     traj.append((valid_final, coords_final, coords_gt_final, Gs[:, :final_n], Ps[:, :final_n], torch.as_tensor(0)))
+
+    #     return traj
+

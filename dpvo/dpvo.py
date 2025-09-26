@@ -111,17 +111,17 @@ class DPVO:
         self.network.cuda()
         self.network.eval()
 
-    def start_viewer(self):
-        from dpviewer import Viewer
+    # def start_viewer(self):
+    #     from dpviewer import Viewer
 
-        intrinsics_ = torch.zeros(1, 4, dtype=torch.float32, device="cuda")
+    #     intrinsics_ = torch.zeros(1, 4, dtype=torch.float32, device="cuda")
 
-        self.viewer = Viewer(
-            self.image_,
-            self.pg.poses_,
-            self.pg.points_,
-            self.pg.colors_,
-            intrinsics_)
+    #     self.viewer = Viewer(
+    #         self.image_,
+    #         self.pg.poses_,
+    #         self.pg.points_,
+    #         self.pg.colors_,
+    #         intrinsics_)
 
     @property
     def poses(self):
