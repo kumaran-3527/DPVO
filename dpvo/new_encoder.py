@@ -11,7 +11,7 @@ warnings.filterwarnings("ignore")
 
 
 
-MODEL_PATH = 'seg_models/facebook/mask2former-swin-small-coco-panoptic'
+MODEL_PATH = 'seg_models/facebook/mask2former-swin-base-coco-panoptic'
 SEG_FP_16 = True
 
 class Mask2Former(nn.Module):
@@ -189,8 +189,6 @@ class Mask2FormerTwoLevel(nn.Module):
           through the small TwoLevelEncoder if you are training something on its features.
 
     Args:
-        mask2former: (optional) pre-instantiated Mask2Former wrapper. Created if None.
-        twolevel: (optional) pre-instantiated TwoLevelEncoder. Created if None.
         parallel: bool, try overlapping with CUDA streams.
         no_grad_mask2former: bool, wrap Mask2Former forward in no_grad (saves memory).
     """
@@ -262,22 +260,6 @@ if __name__ == "__main__":
     print(f"Total forward time (Mask2Former + TwoLevelEncoder): {1000*(time.time() - start)} ms")
     print({k: (v.shape if isinstance(v, torch.Tensor) else type(v)) for k, v in out.items()})
 
-  
-    # ## Inference speed test
-    # torch.cuda.synchronize()
-    # start = torch.cuda.Event(enable_timing=True)
-    # end = torch.cuda.Event(enable_timing=True)
-    # start.record()
-    # with torch.no_grad():
-    #     seg, bb = model(x)  ## Returns seg_maps (B,N,H,W) and list of encoder features Tuple of length 4
-    # end.record()
-    # torch.cuda.synchronize()
-
-    # print(f"Inference time: {start.elapsed_time(end)} ms")
-
-    # # print('Segmentation shape:', seg.shape)
-    # print('bb shape:', bb[-2].shape)  # last layer feature map
-    # print('Unique seg ids (sample):', seg.shape)
 
 
          
