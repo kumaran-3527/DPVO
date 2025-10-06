@@ -188,7 +188,8 @@ class VONet(nn.Module):
     def forward(self, images, poses, disps, intrinsics, M=1024, STEPS=12, P=1, structure_only=False, rescale=False):
         """ Estimates SE3 or Sim3 between pair of frames """
 
-        images = 2 * (images / 255.0) - 0.5
+        # images = 2 * (images / 255.0) - 0.5 ## Maps to [-0.5 , 1.5]
+        images  = images / 225.0 ## Maps to [0 , 1]
         intrinsics = intrinsics / 4.0
         disps = disps[:, :, 1::4, 1::4].float()
 
