@@ -245,6 +245,11 @@ if __name__ == "__main__":
     model  = Mask2FormerTwoLevel(parallel=True).cuda()
     ## pixel values in [0,1]
 
+    try:
+        dev_index = model.device.index or 0
+        torch.cuda.set_per_process_memory_fraction(0.5, dev_index)  # use only ~50% of visible GPU memory
+    except Exception as e:
+        print(f"Could not set memory fraction: {e}")
     ## Warmup
     for _ in range(5):
         x = torch.rand(1, 1, 3, 480, 640, device=device, dtype=torch.float32)
