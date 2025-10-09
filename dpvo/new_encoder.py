@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
 
-
+from typing import Tuple
 import warnings
 import os
 warnings.filterwarnings("ignore")
@@ -189,81 +189,182 @@ class Mask2FormerTwoLevel(nn.Module):
           through the small TwoLevelEncoder if you are training something on its features.
 
     Args:
+        device: torch.device or str, target device for both models
         parallel: bool, try overlapping with CUDA streams.
         no_grad_mask2former: bool, wrap Mask2Former forward in no_grad (saves memory).
     """
     def __init__(self,
+                 device: str | torch.device = 'cuda',
                  parallel: bool = False,
                  no_grad_mask2former: bool = True,
             ):
         super().__init__()
-        self.mask2former = Mask2Former().cuda()
-        self.twolevel = TwoLevelEncoder().cuda()
+        
+        self.device = torch.device(device) if isinstance(device, str) else device
         self.parallel = parallel and torch.cuda.is_available()
         self.no_grad_mask2former = no_grad_mask2former
+    
+        m2f_kwargs = {
+            'model_path': MODEL_PATH,
+            'device': self.device,
+            'eval': True,
+            'capture_encoder': True,
+            'fp_16': SEG_FP_16,
+        }
+        self.mask2former = Mask2Former(**m2f_kwargs)
         
+        tl_kwargs = {
+            'in_channels': 3,
+            'inter_channels': 64,
+            'out_channels': 128,
+            'norm': 'instance',
+            'activation': 'relu',
+        }
+        self.twolevel = TwoLevelEncoder(**tl_kwargs).to(self.device)
+        
+        if self.parallel:
+            self._stream1 = torch.cuda.Stream(device=self.device)
+            self._stream2 = torch.cuda.Stream(device=self.device)
+        else:
+            self._stream1 = self._stream2 = None
 
-    def forward(self, x: torch.Tensor):
-        # Decide execution strategy
+    def to(self, device):
+        """Override to ensure both models move together."""
+        super().to(device)
+        self.device = device if isinstance(device, torch.device) else torch.device(device)
+        self.mask2former = self.mask2former.to(device)
+        self.twolevel = self.twolevel.to(device)
+
+        if self.parallel and torch.cuda.is_available():
+            self._stream1 = torch.cuda.Stream(device=self.device)
+            self._stream2 = torch.cuda.Stream(device=self.device)
+        return self
+
+    def train(self, mode=True):
+        """Override to handle mixed training modes properly."""
+
+        super().train(mode)
+        self.twolevel.train(mode)
+        self.mask2former.eval()
+        return self
+
+    def forward(self, x: torch.Tensor) :
+
+        if x.device != self.device:
+            x = x.to(self.device)
+            
         if not self.parallel:
+  
             if self.no_grad_mask2former:
                 with torch.no_grad():
                     seg_maps, enc_feats = self.mask2former(x)
             else:
                 seg_maps, enc_feats = self.mask2former(x)
+            
             twolevel_feats = self.twolevel(x)
+            
         else:
-          
-            stream1 = torch.cuda.Stream()
-            stream2 = torch.cuda.Stream()
-            # Containers to capture outputs in this scope
             seg_maps = enc_feats = twolevel_feats = None
             if self.no_grad_mask2former:
-                with torch.cuda.stream(stream1), torch.no_grad():
+                with torch.cuda.stream(self._stream1), torch.no_grad():
                     seg_maps, enc_feats = self.mask2former(x)
             else:
-                with torch.cuda.stream(stream1):
+                with torch.cuda.stream(self._stream1):
                     seg_maps, enc_feats = self.mask2former(x)
-            with torch.cuda.stream(stream2):
+     
+            with torch.cuda.stream(self._stream2):
                 twolevel_feats = self.twolevel(x)
-            # Ensure both complete before returning
-            torch.cuda.synchronize()
+            
+            self._stream1.synchronize()
+            self._stream2.synchronize()
 
-        return {
-            'segmentation': seg_maps,
-            'mask2former_encoder': enc_feats,
-            'twolevel_features': twolevel_feats,
-        }
+        return seg_maps, enc_feats, twolevel_feats
+    
+
+    # def get_memory_usage(self):
+    #     """Helper to monitor GPU memory usage."""
+    #     if torch.cuda.is_available():
+    #         return {
+    #             'allocated': torch.cuda.memory_allocated(self.device) / 1024**3,  # GB
+    #             'reserved': torch.cuda.memory_reserved(self.device) / 1024**3,    # GB
+    #             'max_allocated': torch.cuda.max_memory_allocated(self.device) / 1024**3,  # GB
+    #         }
+    #     return None
 
 
+def test_combined_model(device='cuda', parallel=True, test_training=False):
+
+    print(f"Testing Mask2FormerTwoLevel (parallel={parallel}, device={device})")
+    
+    try:
+       
+        model = Mask2FormerTwoLevel(device=device, parallel=parallel)
+        print(f"Model initialized on {model.device}")
+        
+        x = torch.rand(1, 1, 3, 480, 640, device=device, dtype=torch.float32)
+
+        print("Warming up...")
+        for i in range(3):
+            with torch.no_grad():
+                seg_maps, enc_feats, twolevel_feats = model(x)
+        
+        torch.cuda.synchronize()
+        import time
+        start = time.time()
+        with torch.no_grad():
+            seg_maps, enc_feats, twolevel_feats = model(x)
+        torch.cuda.synchronize()
+        inference_time = 1000 * (time.time() - start)
+        print(seg_maps.shape , enc_feats.shape, twolevel_feats.shape)
+        print(f"Inference time: {inference_time:.2f} ms")
+
+
+
+        if test_training:
+            print("\nTesting training mode...")
+            model.train()
+            model.no_grad_mask2former = True 
+
+            seg_maps, enc_feats, twolevel_feats = model(x)
+            loss = twolevel_feats.mean()
+            loss.backward()
+            print(f"Training forward+backward successful. Loss: {loss.item():.6f}")
+            
+      
+            has_grads = sum(1 for p in model.twolevel.parameters() if p.grad is not None)
+            total_params = sum(1 for p in model.twolevel.parameters())
+            print(f"TwoLevel gradients: {has_grads}/{total_params} parameters")
+            
+            m2f_grads = sum(1 for p in model.mask2former.parameters() if p.grad is not None)
+            print(f"Mask2Former gradients: {m2f_grads} (should be 0)")
+        
+        return model , seg_maps, enc_feats, twolevel_feats
+        
+    except torch.cuda.OutOfMemoryError as e:
+        print(f"CUDA OOM Error: {e}")
+        print("Try reducing batch size or input resolution")
+        torch.cuda.empty_cache()
+        return None, None
+    except Exception as e:
+        print(f"Error during testing: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
 
 
 if __name__ == "__main__":
-    device = 'cuda' 
-    # model = Mask2Former(device=device)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    model  = Mask2FormerTwoLevel(parallel=True).cuda()
-    ## pixel values in [0,1]
+    print("=" * 50)
+    # model_seq, out_seq = test_combined_model(device=device, parallel=False, test_training=True)
+    
+    print("\n" + "=" * 50)
+    model_par , seg_maps, enc_feats, twolevel_feats = test_combined_model(device=device, parallel=True, test_training=False)
 
-    try:
-        dev_index = model.device.index or 0
-        torch.cuda.set_per_process_memory_fraction(0.5, dev_index)  # use only ~50% of visible GPU memory
-    except Exception as e:
-        print(f"Could not set memory fraction: {e}")
-    ## Warmup
-    for _ in range(5):
-        x = torch.rand(1, 1, 3, 480, 640, device=device, dtype=torch.float32)
-        out = model(x)
-    ## Timing test
-    ## Total forward time test (Mask2Former + TwoLevelEncoder)
-    torch.cuda.synchronize()
-    import time
-    start = time.time()
-    x = torch.rand(1, 1, 3, 480, 640, device=device, dtype=torch.float32)
-    out = model(x)
-    torch.cuda.synchronize()
-    print(f"Total forward time (Mask2Former + TwoLevelEncoder): {1000*(time.time() - start)} ms")
-    print({k: (v.shape if isinstance(v, torch.Tensor) else type(v)) for k, v in out.items()})
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    print("\nTesting complete!")
 
 
 
