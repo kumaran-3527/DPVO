@@ -15,6 +15,8 @@ from .lietorch import SE3
 from .extractor import BasicEncoder, BasicEncoder4
 from .blocks import GradientClip, GatedResidual, SoftAgg
 
+from .new_encoders_1 import BackBone, Mask2Former, SimpleFeatureFusion
+
 from .utils import *
 from .ba import BA
 from . import projective_ops as pops
@@ -23,6 +25,8 @@ autocast = torch.cuda.amp.autocast
 import matplotlib.pyplot as plt
 
 DIM = 384
+MODEL_PATH = "seg_models/facebook/mask2former-swin-small-coco-panoptic"
+SEG_FP_16 = True
 
 class Update(nn.Module):
     def __init__(self, p):
@@ -96,8 +100,16 @@ class Patchifier(nn.Module):
     def __init__(self, patch_size=3):
         super(Patchifier, self).__init__()
         self.patch_size = patch_size
-        self.fnet = BasicEncoder4(output_dim=128, norm_fn='instance')
-        self.inet = BasicEncoder4(output_dim=DIM, norm_fn='none')
+        # self.fnet = BasicEncoder4(output_dim=128, norm_fn='instance')
+        # self.inet = BasicEncoder4(output_dim=DIM, norm_fn='none')
+
+        # self.fnet = BackBone(model_path= MODEL_PATH, device='cuda', eval=True, capture_encoder=True, fp_16 = SEG_FP_16 , out_dim=128)
+        # self.inet = BackBone(model_path = MODEL_PATH,device='cuda', eval=True, capture_encoder=True, fp_16 = SEG_FP_16 , out_dim=386)
+
+        self.mask2former = Mask2Former(model_path= MODEL_PATH, device='cuda', eval=True, capture_encoder=True, fp_16 = SEG_FP_16 ).eval()
+        self.fnet = SimpleFeatureFusion(out_dim=128)
+        self.inet  = SimpleFeatureFusion(out_dim=DIM)
+
 
     def __image_gradient(self, images):
         gray = ((images + 0.5) * (255.0 / 2)).sum(dim=2)
@@ -106,11 +118,21 @@ class Patchifier(nn.Module):
         g = torch.sqrt(dx**2 + dy**2)
         g = F.avg_pool2d(g, 4, 4)
         return g
+    
 
     def forward(self, images, patches_per_image=80, disps=None, centroid_sel_strat='RANDOM', return_color=False):
         """ extract patches from input images """
-        fmap = self.fnet(images) / 4.0
-        imap = self.inet(images) / 4.0
+        
+        B, N, C, H, W = images.shape
+
+        with torch.no_grad():
+            seg_maps , enc_feats = self.mask2former(images)
+
+        fmap = self.fnet(enc_feats[0], enc_feats[1], enc_feats[2], out_size=(H//8, W//8), interp_mode='bilinear')  # (B*N,128,H/8,W/8)
+        fmap = fmap.view(B, N, fmap.shape[1], fmap.shape[2], fmap.shape[3]).to(torch.float32)
+
+        imap = self.inet(enc_feats[0], enc_feats[1], enc_feats[2], out_size=(H//8, W//8), interp_mode='bilinear') 
+        imap = imap.view(B, N, imap.shape[1], imap.shape[2], imap.shape[3]).to(torch.float32)  # (B*N,D,H/8,W/8)
 
         b, n, c, h, w = fmap.shape
         P = self.patch_size
@@ -131,6 +153,13 @@ class Patchifier(nn.Module):
         elif centroid_sel_strat == 'RANDOM':
             x = torch.randint(1, w-1, size=[n, patches_per_image], device="cuda")
             y = torch.randint(1, h-1, size=[n, patches_per_image], device="cuda")
+ 
+        
+        # elif centroid_sel_strat == 'BOUNDARY_SENSITIVE'
+
+        # elif centroid_sel_strat == 'SEMANTIC_BIAS':
+
+
 
         else:
             raise NotImplementedError(f"Patch centroid selection not implemented: {centroid_sel_strat}")
@@ -268,144 +297,67 @@ class VONet(nn.Module):
             coords = pops.transform(Gs, patches, intrinsics, ii[k], jj[k], kk[k])
             coords_gt, valid, _ = pops.transform(Ps, patches_gt, intrinsics, ii[k], jj[k], kk[k], jacobian=True)
 
-            traj.append((valid, coords, coords_gt, Gs[:,:n], Ps[:,:n], kl))
+            traj.append((valid, coords, coords_gt, Gs[:,:n], Ps[:,:n], kl, net))
 
         return traj
 
 
-    # @autocast(enabled=False)
-    # def forward_deferred_ba(self, images, poses, disps, intrinsics, M=1024, STEPS=12, P=1, structure_only=False, rescale=False, final_ep=20):
-    #     """Like forward(), but defers bundle adjustment until the end.
+if __name__ == "__main__":
 
-    #     Steps:
-    #     - Run STEPS of correlation/update to produce per-edge target and weight.
-    #     - Accumulate constraints from each step without calling BA inside the loop.
-    #     - Run a single BA over all accumulated constraints.
-    #     - Return a trajectory list similar to forward(), plus a final post-BA entry.
 
-    #     Returns:
-    #         traj: list of tuples (valid, coords, coords_gt, Gs[:, :n], Ps[:, :n], kl)
-    #               One tuple per step (pre-BA), and one final post-BA tuple appended at the end.
-    #     """
+    import torch
 
-    #     # Preprocess inputs (same as forward)
-    #     images = 2 * (images / 255.0) - 0.5
-    #     intrinsics = intrinsics / 4.0
-    #     disps = disps[:, :, 1::4, 1::4].float()
+    model = VONet()  # your model
+    model.train()    # enable training mode globally
 
-    #     fmap, gmap, imap, patches, ix = self.patchify(images, disps=disps)
-    #     corr_fn = CorrBlock(fmap, gmap)
+    # 1) Keep Mask2Former frozen and in eval mode
+    model.patchify.mask2former.eval()
+    for p in model.patchify.mask2former.parameters():
+        p.requires_grad_(False)
 
-    #     b, N, c, h, w = fmap.shape
-    #     p = self.P
+    # 2) Ensure fusion modules are trainable
+    model.patchify.fnet.train()
+    model.patchify.inet.train()
+    for p in model.patchify.fnet.parameters():
+        p.requires_grad_(True)
+    for p in model.patchify.inet.parameters():
+        p.requires_grad_(True)
 
-    #     patches_gt = patches.clone()
-    #     Ps = poses
+    # 3) Build optimizer over only trainable params
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-4)
 
-    #     # Initialize patch depths with random values at center pixel
-    #     d = patches[..., 2, p//2, p//2]
-    #     patches = set_depth(patches, torch.rand_like(d))
+    # (Optional) separate LR for fusion vs rest:
+    fusion_params = list(model.patchify.fnet.parameters()) + list(model.patchify.inet.parameters())
+    rest_params = [p for p in model.parameters() if p.requires_grad and p not in fusion_params]
+    optimizer = torch.optim.Adam(
+        [
+            {"params": fusion_params, "lr": 1e-4},
+            {"params": rest_params, "lr": 1e-4},  # or a different LR if you like
+        ]
+    )
 
-    #     # Build initial edge set over first 8 frames
-    #     kk, jj = flatmeshgrid(torch.where(ix < 8)[0], torch.arange(0, 8, device="cuda"), indexing='ij')
-    #     ii = ix[kk]
+    # 4) Safety: if you ever call model.train() again (e.g., each epoch), re-pin mask2former to eval:
+    # model.train()
+    # model.patchify.mask2former.eval()
+    # for p in model.patchify.mask2former.parameters():
+    #     p.requires_grad_(False)
 
-    #     # Feature/hidden states for update
-    #     imap = imap.view(b, -1, DIM)
-    #     net = torch.zeros(b, len(kk), DIM, device="cuda", dtype=torch.float)
+    # 5) Gradient sanity check (optional)
+    dummy_images = torch.randn(1, 8, 3, 256, 320, device="cuda")
+    dummy_poses = SE3.IdentityLike(torch.zeros(1,8, device="cuda"))
+    dummy_disps = torch.ones(1, 8, 256, 320, device="cuda")
+    dummy_intr = torch.tensor([[[320., 0., 160.], [0., 320., 128.], [0., 0., 1.]]], device="cuda")
 
-    #     # Initialize poses
-    #     Gs = SE3.IdentityLike(poses)
-    #     if structure_only:
-    #         Gs.data[:] = poses.data[:]
+    model.cuda()
+    out = model(dummy_images, dummy_poses, dummy_disps, dummy_intr)  # your normal forward & loss path
+    loss = out[0][0].shape[0] * 0.001  # dummy loss
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
 
-    #     # Accumulators for a single BA at the end
-    #     ii_list, jj_list, kk_list = [], [], []
-    #     target_list, weight_list = [], []
 
-    #     traj = []
-    #     bounds = [-64, -64, w + 64, h + 64]
-
-    #     # Main iterative loop without BA
-    #     while len(traj) < STEPS:
-    #         # Detach to avoid building huge graphs
-    #         Gs = Gs.detach()
-    #         patches = patches.detach()
-
-    #         # Possibly introduce a new frame (same logic as forward)
-    #         n = ii.max() + 1
-    #         if len(traj) >= 8 and n < images.shape[1]:
-    #             if not structure_only:
-    #                 Gs.data[:, n] = Gs.data[:, n - 1]
-    #             kk1, jj1 = flatmeshgrid(torch.where(ix < n)[0], torch.arange(n, n + 1, device="cuda"), indexing='ij')
-    #             kk2, jj2 = flatmeshgrid(torch.where(ix == n)[0], torch.arange(0, n + 1, device="cuda"), indexing='ij')
-
-    #             ii = torch.cat([ix[kk1], ix[kk2], ii])
-    #             jj = torch.cat([jj1, jj2, jj])
-    #             kk = torch.cat([kk1, kk2, kk])
-
-    #             net1 = torch.zeros(b, len(kk1) + len(kk2), DIM, device="cuda")
-    #             net = torch.cat([net1, net], dim=1)
-
-    #             if np.random.rand() < 0.1:
-    #                 k = (ii != (n - 4)) & (jj != (n - 4))
-    #                 ii = ii[k]
-    #                 jj = jj[k]
-    #                 kk = kk[k]
-    #                 net = net[:, k]
-
-    #             # Initialize depths for patches in the new frame from median of previous frames
-    #             patches[:, ix == n, 2] = torch.median(patches[:, (ix == n - 1) | (ix == n - 2), 2])
-    #             n = ii.max() + 1
-
-    #         # Predict correspondences and residual corrections
-    #         coords = pops.transform(Gs, patches, intrinsics, ii, jj, kk)
-    #         coords1 = coords.permute(0, 1, 4, 2, 3).contiguous()
-
-    #         corr = corr_fn(kk, jj, coords1)
-    #         net, (delta, weight, _) = self.update(net, imap[:, kk], corr, None, ii, jj, kk)
-
-    #         # Accumulate constraints for final BA
-    #         lmbda = 1e-4
-    #         target = coords[..., p // 2, p // 2, :] + delta
-
-    #         ii_list.append(ii.clone())
-    #         jj_list.append(jj.clone())
-    #         kk_list.append(kk.clone())
-    #         target_list.append(target)
-    #         weight_list.append(weight)
-
-    #         # For logging/compatibility, compute the same per-step traj tuple (pre-BA)
-    #         kl = torch.as_tensor(0)
-    #         dij = (ii - jj).abs()
-    #         k = (dij > 0) & (dij <= 2)
-
-    #         coords_log = pops.transform(Gs, patches, intrinsics, ii[k], jj[k], kk[k])
-    #         coords_gt_log, valid_log, _ = pops.transform(Ps, patches_gt, intrinsics, ii[k], jj[k], kk[k], jacobian=True)
-
-    #         traj.append((valid_log, coords_log, coords_gt_log, Gs[:, :n], Ps[:, :n], kl))
-
-    #     # Run a single BA at the end over all accumulated constraints
-    #     ii_cat = torch.cat(ii_list, dim=0) if len(ii_list) > 0 else ii
-    #     jj_cat = torch.cat(jj_list, dim=0) if len(jj_list) > 0 else jj
-    #     kk_cat = torch.cat(kk_list, dim=0) if len(kk_list) > 0 else kk
-    #     target_cat = torch.cat(target_list, dim=1) if len(target_list) > 0 else target
-    #     weight_cat = torch.cat(weight_list, dim=1) if len(weight_list) > 0 else weight
-
-    #     # Do one bigger BA to refine Gs and structure
-    #     Gs, patches = BA(Gs, patches, intrinsics, target_cat, weight_cat, lmbda,
-    #                      ii_cat, jj_cat, kk_cat, bounds, ep=final_ep, fixedp=1,
-    #                      structure_only=structure_only)
-
-    #     # Append a final post-BA trajectory entry for convenience
-    #     final_n = int(ii_cat.max().item()) + 1 if ii_cat.numel() > 0 else int(ii.max().item()) + 1
-    #     dij = (ii_cat - jj_cat).abs()
-    #     k = (dij > 0) & (dij <= 2)
-
-    #     coords_final = pops.transform(Gs, patches, intrinsics, ii_cat[k], jj_cat[k], kk_cat[k])
-    #     coords_gt_final, valid_final, _ = pops.transform(Ps, patches_gt, intrinsics, ii_cat[k], jj_cat[k], kk_cat[k], jacobian=True)
-
-    #     traj.append((valid_final, coords_final, coords_gt_final, Gs[:, :final_n], Ps[:, :final_n], torch.as_tensor(0)))
-
-    #     return traj
-
+    # assert any grad in fusion, none in mask2former
+    assert any(p.grad is not None for p in model.patchify.fnet.parameters()), "fnet not receiving grads"
+    assert any(p.grad is not None for p in model.patchify.inet.parameters()), "inet not receiving grads"
+    assert all(p.grad is None for p in model.patchify.mask2former.parameters()), "mask2former should be frozen"

@@ -156,7 +156,7 @@ class Mask2Former(nn.Module):
         )
 
         seg_maps = torch.stack([r["segmentation"] for r in panoptic_results], dim=0)  # (B*N, H, W)
-        seg_maps = seg_maps.view(B, N, H, W)
+        seg_maps = seg_maps.view(B, N, H, W).to(torch.int32)
 
         encoder_feature_maps = None
         if self.capture_encoder and self._encoder_out is not None:
@@ -215,7 +215,7 @@ if __name__ == "__main__" :
     model = BackBone(model_path=MODEL_PATH, device='cuda', eval=True, capture_encoder=True, fp_16=SEG_FP_16, out_dim=386)
     x = image.unsqueeze(0).unsqueeze(0).to(model.device)
     # Warmup 
-    for i in range(3):
+    for i in range(5):
         with torch.no_grad():
             seg_maps, enc_feats = model(x)
 
