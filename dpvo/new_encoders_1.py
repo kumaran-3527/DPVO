@@ -3,11 +3,69 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
-
-
-
-MODEL_PATH = 'seg_models/facebook/mask2former-swin-base-coco-panoptic'
+MODEL_PATH = 'seg_models/facebook/mask2former-swin-small-coco-panoptic'
 SEG_FP_16 = True
+
+
+class SimpleFeatureFusion(nn.Module):
+    """Minimal feature pyramid fusion with deconvs and InstanceNorm.
+    - Inputs: c1 (B, 96, 96, 96), c2 (B, 192, 48, 48), c3 (B, 384, 24, 24)
+    """
+
+    def __init__(
+        self,
+        out_dim: int,
+        c1_channels: int = 96,
+        c2_channels: int = 192,
+        c3_channels: int = 384,
+    ) -> None:
+        super().__init__()
+
+        # c3 (24x24) -> c2 (48x48)
+        self.up_c3_to_c2 = nn.Sequential(
+            nn.ConvTranspose2d(c3_channels, c2_channels, kernel_size=2, stride=2, bias=False),
+            nn.InstanceNorm2d(c2_channels, affine=True),
+            nn.ReLU(inplace=True),
+        )
+
+        # (c2 + up(c3)) (48x48) -> c1 (96x96)
+        self.up_to_c1 = nn.Sequential(
+            nn.ConvTranspose2d(c2_channels, c1_channels, kernel_size=2, stride=2, bias=False),
+            nn.InstanceNorm2d(c1_channels, affine=True),
+            nn.ReLU(inplace=True),
+        )
+
+        # Final projection to DIM with 1x1 conv
+        self.proj = nn.Conv2d(c1_channels, out_dim, kernel_size=1, bias=True)
+
+
+    def forward(
+        self,
+        c1: torch.Tensor,
+        c2: torch.Tensor,
+        c3: torch.Tensor,
+        out_size: tuple[int, int] | None = None,
+        interp_mode: str = "bilinear",
+    ) -> torch.Tensor:
+        
+        # c3 -> c2 size, fuse
+        c3_up = self.up_c3_to_c2(c3)
+        c2_fused = c2 + c3_up
+
+        # -> c1 size, fuse
+        x = self.up_to_c1(c2_fused)
+        x = x + c1
+
+        # 1x1 to desired channels (DIM)
+        x = self.proj(x)
+
+        # Optional final interpolation to target spatial size
+        if out_size is not None:
+            align = False if interp_mode in {"bilinear", "bicubic", "trilinear"} else None
+            x = F.interpolate(x, size=out_size, mode=interp_mode, align_corners=align)
+        return x
+
+
 
 class Mask2Former(nn.Module):
     """Wrapper around Mask2Former panoptic model that also exposes encoder (backbone) features.
@@ -109,12 +167,40 @@ class Mask2Former(nn.Module):
     
 
 
+class BackBone(nn.Module):
+    """
+    Simple wrapper to combine Mask2Former backbone and feature fusion into single module.
+    """
+    def __init__(self, model_path: str = MODEL_PATH, device: str = 'cuda', eval: bool = True , capture_encoder: bool = True, fp_16 : bool = True, out_dim: int = 128 ) :
+        super().__init__()
 
-# class FeatureFusion(nn.Module):
+        self.device = device
 
-#     def __init__(self, in_channels , out_channels , ):
-#         super(FeatureFusion).__init__()
+        self.mask2former = Mask2Former(model_path=model_path, device=device, eval=eval, capture_encoder=capture_encoder, fp_16=fp_16)
+        self.feat_fuser = SimpleFeatureFusion(out_dim=out_dim, c1_channels=96, c2_channels=192, c3_channels=384).to(device).half() if fp_16 else SimpleFeatureFusion(out_dim=out_dim, c1_channels=96, c2_channels=192, c3_channels=384).to(device)
+        self.fp_16 = fp_16
 
+
+    def forward(self, x: torch.Tensor):
+        """Run panoptic segmentation and return (segmentation_maps, fused_encoder_features).
+
+        segmentation_maps: (B, N, H, W) integer map of segment ids
+        fused_encoder_features:  Fused encoder features from feature pyramid (B*N,D,H/8,W/8)
+        """
+        B, N, C, H, W = x.shape
+
+        with torch.cuda.amp.autocast(enabled=self.fp_16):
+            seg_maps, enc_feats = self.mask2former(x)  # (B,N,H,W), List of 4 feature maps [(B*N,C,H',W'),...]
+
+            if enc_feats is not None and len(enc_feats) >= 3:
+                fused_feats = self.feat_fuser(enc_feats[0], enc_feats[1], enc_feats[2], out_size=(x.shape[-2] // 8, x.shape[-1] // 8), interp_mode='bilinear')  # (B*N,D,H/8,W/8)
+            else:
+                fused_feats = None
+
+        seg_maps = seg_maps.view(B, N, H, W)
+        fused_feats = fused_feats.view(B, N, fused_feats.shape[1], fused_feats.shape[2], fused_feats.shape[3])
+        
+        return seg_maps, fused_feats
 
 
 if __name__ == "__main__" : 
@@ -123,17 +209,25 @@ if __name__ == "__main__" :
     import numpy as np
     import time
 
-    model = Mask2Former(model_path=MODEL_PATH, device='cuda', eval=True, capture_encoder=True, fp_16=SEG_FP_16)
-    model.eval()
-  
     image = Image.open("datasets/mono/ME002/000002.png").convert("RGB")
     image = torch.from_numpy( np.array(image).astype('float32').transpose(2,0,1) / 255.0 )  # (3,H,W) in [0,1]
+    
+    model = BackBone(model_path=MODEL_PATH, device='cuda', eval=True, capture_encoder=True, fp_16=SEG_FP_16, out_dim=386)
+    x = image.unsqueeze(0).unsqueeze(0).to(model.device)
+    # Warmup 
+    for i in range(3):
+        with torch.no_grad():
+            seg_maps, enc_feats = model(x)
+
+
+    start  = time.time()
     with torch.no_grad():
-        seg_maps, enc_feats = model(image.unsqueeze(0).unsqueeze(0).to(model.device))  # (B,N,H,W), list of (B*N,C,H',W')
+        seg_maps, fused_feats = model(x)
+    end = time.time()
+    print(f"Time taken: {(end-start)*1000:.1f} ms")
+    print(seg_maps.shape)  # (1, 1, 480, 640)
+    print(fused_feats.shape)  # (1, 1, 128, 60, 80)
 
-    print("Segmentation maps shape:", seg_maps.shape)  # (B,N,H,W)
-
-    print("Encoder feature map 1 shape:", enc_feats[0].shape)  # (B*N,C,H',W')
-    print("Encoder feature map 2 shape:", enc_feats[1].shape)  # (B*N,C,H',W')
-    print("Encoder feature map 3 shape:", enc_feats[2].shape)  # (B*N,C,H',W')
-    print("Encoder feature map 4 shape:", enc_feats[3].shape)  # (B*N,C,H',W')
+    torch.cuda.synchronize()
+   
+    
