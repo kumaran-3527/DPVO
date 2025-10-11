@@ -74,12 +74,19 @@ class TartanAir(RGBDDataset):
         for scene in tqdm(sorted(scenes)):
             
             images = sorted(glob.glob(osp.join(scene, 'image_left/*.png')))
+
             # collect depth files: support both .npy and .png
             depth_npy = sorted(glob.glob(osp.join(scene, 'depth_left/*.npy')))
             depth_png = sorted(glob.glob(osp.join(scene, 'depth_left/*.png')))
             if depth_npy and depth_png:
                 raise RuntimeError(f"Both .npy and .png depth files found in {scene}; expected only one format")
             depths = depth_npy if depth_npy else depth_png
+
+            seg_npy = sorted(glob.glob(osp.join(scene, 'seg_left/*.npy')))
+            seg_png = sorted(glob.glob(osp.join(scene, 'seg_left/*.png')))
+            if seg_npy and seg_png:
+                raise RuntimeError(f"Both .npy and .png segmentation files found in {scene}; expected only one format")
+            seg_maps = seg_npy if seg_npy else seg_png
 
             if len(images) != len(depths):
                 continue
@@ -93,10 +100,11 @@ class TartanAir(RGBDDataset):
             graph = self.build_frame_graph(poses, depths, intrinsics)
 
             scene = '/'.join(scene.split('/'))
-            scene_info[scene] = {'images': images, 'depths': depths, 
+            scene_info[scene] = {'images': images, 'depths': depths, 'segmentations': seg_maps, 
                 'poses': poses, 'intrinsics': intrinsics, 'graph': graph}
 
         return scene_info
+
 
     @staticmethod
     def calib_read():
@@ -124,5 +132,22 @@ class TartanAir(RGBDDataset):
             depth = depth_rgba.view("<f4")
             depth = np.squeeze(depth, axis=-1)
             return depth.astype(np.float32, copy=False)
+
+    @staticmethod
+    def seg_read(seg_file):
+
+        if not osp.exists(seg_file):
+            print("Segmentation file not found: {}".format(seg_file))
+            return None
+        
+        if seg_file.endswith(".npy"):
+            seg = np.load(seg_file)
+            return seg.astype(np.int32, copy=False)
+
+        if seg_file.endswith('.png'):
+            seg = cv2.imread(seg_file, cv2.IMREAD_UNCHANGED)
+            if len(seg.shape) == 3:
+                seg = seg[:,:,0] + seg[:,:,1]*256 + seg[:,:,2]*256*256
+            return seg.astype(np.int32, copy=False)
 
 

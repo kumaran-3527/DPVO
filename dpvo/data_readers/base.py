@@ -77,6 +77,24 @@ class RGBDDataset(data.Dataset):
             depth = depth_rgba.view("<f4")
             depth = np.squeeze(depth, axis=-1)
             return depth.astype(np.float32, copy=False)
+    
+    @staticmethod
+    def seg_read(seg_file):
+
+        if not osp.exists(seg_file):
+            print("Segmentation file not found: {}".format(seg_file))
+            return None
+        
+        if seg_file.endswith(".npy"):
+            seg = np.load(seg_file)
+            return seg.astype(np.int32, copy=False)
+
+        if seg_file.endswith('.png'):
+            seg = cv2.imread(seg_file, cv2.IMREAD_UNCHANGED)
+            if len(seg.shape) == 3:
+                seg = seg[:,:,0] + seg[:,:,1]*256 + seg[:,:,2]*256*256
+            return seg.astype(np.int32, copy=False)
+
 
     def build_frame_graph(self, poses, depths, intrinsics, f=16, max_flow=256):
         """ compute optical flow distance between all pairs of frames """
@@ -109,6 +127,7 @@ class RGBDDataset(data.Dataset):
         depths_list = self.scene_info[scene_id]['depths']
         poses_list = self.scene_info[scene_id]['poses']
         intrinsics_list = self.scene_info[scene_id]['intrinsics']
+        seg_list = self.scene_info[scene_id].get('segmentations', None)
 
         # stride = np.random.choice([1,2,3])
 
@@ -156,16 +175,26 @@ class RGBDDataset(data.Dataset):
 
 
         images, depths, poses, intrinsics = [], [], [], []
+        segs = [] if seg_list is not None and len(seg_list) == len(images_list) else None
         for i in inds:
             images.append(self.__class__.image_read(images_list[i]))
             depths.append(self.__class__.depth_read(depths_list[i]))
             poses.append(poses_list[i])
             intrinsics.append(intrinsics_list[i])
+            if segs is not None:
+                # If a seg file is missing, drop segs for this batch to avoid partial tensors
+                seg_i = self.__class__.seg_read(seg_list[i]) if seg_list[i] is not None else None
+                if seg_i is None:
+                    segs = None
+                elif segs is not None:
+                    segs.append(seg_i)
 
         images = np.stack(images).astype(np.float32)
         depths = np.stack(depths).astype(np.float32)
         poses = np.stack(poses).astype(np.float32)
         intrinsics = np.stack(intrinsics).astype(np.float32)
+        if segs is not None:
+            segs = np.stack(segs).astype(np.int32)
 
         images = torch.from_numpy(images).float()
         images = images.permute(0, 3, 1, 2)
@@ -173,17 +202,25 @@ class RGBDDataset(data.Dataset):
         disps = torch.from_numpy(1.0 / depths)
         poses = torch.from_numpy(poses)
         intrinsics = torch.from_numpy(intrinsics)
+        segs_t = torch.from_numpy(segs) if isinstance(segs, np.ndarray) else None
 
         if self.aug:
-            images, poses, disps, intrinsics = \
-                self.aug(images, poses, disps, intrinsics)
+            if segs_t is not None:
+                images, poses, disps, intrinsics, segs_t = \
+                    self.aug(images, poses, disps, intrinsics, segs=segs_t)
+            else:
+                images, poses, disps, intrinsics = \
+                    self.aug(images, poses, disps, intrinsics)
 
         # normalize depth
         s = .7 * torch.quantile(disps, .98)
         disps = disps / s
         poses[...,:3] *= s
 
-        return images, poses, disps, intrinsics 
+        if segs_t is not None:
+            return images, poses, disps, intrinsics, segs_t
+        else:
+            return images, poses, disps, intrinsics 
 
     def __len__(self):
         return len(self.dataset_index)

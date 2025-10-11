@@ -73,7 +73,13 @@ def train(args):
 
     while 1:
         for data_blob in train_loader:
-            images, poses, disps, intrinsics = [x.cuda().float() for x in data_blob]
+            # Support optional segmentation maps as a 5th element
+            if len(data_blob) == 5:
+                images, poses, disps, intrinsics, segs = data_blob
+                images, poses, disps, intrinsics = images.cuda().float(), poses.cuda().float(), disps.cuda().float(), intrinsics.cuda().float()
+                # segs can be used in future; keep on CPU or move if needed
+            else:
+                images, poses, disps, intrinsics = [x.cuda().float() for x in data_blob]
             optimizer.zero_grad()
 
             # fix poses to gt for first 1k steps
@@ -83,7 +89,7 @@ def train(args):
             traj = net(images, poses, disps, intrinsics, M=1024, STEPS=18, structure_only=so)
 
             loss = 0.0
-            for i, (v, x, y, P1, P2, kl) in enumerate(traj):
+            for i, (v, x, y, P1, P2, kl,net) in enumerate(traj):
                 e = (x - y).norm(dim=-1)
                 e = e.reshape(-1, net.P**2)[(v > 0.5).reshape(-1)].min(dim=-1).values
 
