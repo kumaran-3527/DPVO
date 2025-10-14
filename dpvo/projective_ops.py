@@ -128,3 +128,19 @@ def flow_mag(poses, patches, intrinsics, ii, jj, kk, beta=0.3):
     flow2 = (coords2 - coords0).norm(dim=-1)
 
     return beta * flow1 + (1-beta) * flow2, (val > 0.5)
+
+
+def induced_flow(poses, disps, intrinsics, ii, jj):
+    """optical flow induced by camera motion"""
+
+    ht, wd = disps.shape[2:]
+    y, x = torch.meshgrid(
+        torch.arange(ht, device=disps.device, dtype=torch.float),
+        torch.arange(wd, device=disps.device, dtype=torch.float),
+        indexing="ij",
+    )
+    
+    coords0 = torch.stack([x, y], dim=-1)
+    coords1, valid = transform(poses, disps, intrinsics, ii, jj, False)
+
+    return coords1[..., :2] - coords0, valid
