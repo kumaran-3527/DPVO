@@ -15,7 +15,8 @@ from .lietorch import SE3
 from .extractor import BasicEncoder, BasicEncoder4
 from .blocks import GradientClip, GatedResidual, SoftAgg
 
-from .new_encoders_1 import BackBone, Mask2Former, SimpleFeatureFusion
+from .new_encoders_1 import Mask2Former, SimpleFeatureFusion
+from patch_sampling_utils import seg_to_boundary_mask, boundary_sensitive_sample_coords
 
 from .utils import *
 from .ba import BA
@@ -119,7 +120,7 @@ class Patchifier(nn.Module):
         g = F.avg_pool2d(g, 4, 4)
         return g
     
-
+    
     def forward(self, images, patches_per_image=80, disps=None, centroid_sel_strat='RANDOM', return_color=False):
         """ extract patches from input images """
         
@@ -155,11 +156,18 @@ class Patchifier(nn.Module):
             y = torch.randint(1, h-1, size=[n, patches_per_image], device="cuda")
  
         
-        # elif centroid_sel_strat == 'BOUNDARY_SENSITIVE'
-
-        # elif centroid_sel_strat == 'SEMANTIC_BIAS':
-
-
+        elif centroid_sel_strat == 'BOUNDARY_SENSITIVE':
+            # Delegate boundary-sensitive coordinate sampling to utility function to keep net.py simple
+            grad_map = self.__image_gradient(images)  # (B, N, ?, ?)
+            x, y = boundary_sensitive_sample_coords(
+                seg_maps=seg_maps,
+                grad_map=grad_map,
+                feature_hw=(h, w),
+                patches_per_image=patches_per_image,
+                batch_index=0,
+                dilate=2,
+                device=images.device,
+            )
 
         else:
             raise NotImplementedError(f"Patch centroid selection not implemented: {centroid_sel_strat}")
@@ -302,62 +310,62 @@ class VONet(nn.Module):
         return traj
 
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
 
-    import torch
+#     import torch
 
-    model = VONet()  # your model
-    model.train()    # enable training mode globally
+#     model = VONet()  # your model
+#     model.train()    # enable training mode globally
 
-    # 1) Keep Mask2Former frozen and in eval mode
-    model.patchify.mask2former.eval()
-    for p in model.patchify.mask2former.parameters():
-        p.requires_grad_(False)
+#     # 1) Keep Mask2Former frozen and in eval mode
+#     model.patchify.mask2former.eval()
+#     for p in model.patchify.mask2former.parameters():
+#         p.requires_grad_(False)
 
-    # 2) Ensure fusion modules are trainable
-    model.patchify.fnet.train()
-    model.patchify.inet.train()
-    for p in model.patchify.fnet.parameters():
-        p.requires_grad_(True)
-    for p in model.patchify.inet.parameters():
-        p.requires_grad_(True)
+#     # 2) Ensure fusion modules are trainable
+#     model.patchify.fnet.train()
+#     model.patchify.inet.train()
+#     for p in model.patchify.fnet.parameters():
+#         p.requires_grad_(True)
+#     for p in model.patchify.inet.parameters():
+#         p.requires_grad_(True)
 
-    # 3) Build optimizer over only trainable params
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable_params, lr=1e-4)
+#     # 3) Build optimizer over only trainable params
+#     trainable_params = [p for p in model.parameters() if p.requires_grad]
+#     optimizer = torch.optim.Adam(trainable_params, lr=1e-4)
 
-    # (Optional) separate LR for fusion vs rest:
-    fusion_params = list(model.patchify.fnet.parameters()) + list(model.patchify.inet.parameters())
-    rest_params = [p for p in model.parameters() if p.requires_grad and p not in fusion_params]
-    optimizer = torch.optim.Adam(
-        [
-            {"params": fusion_params, "lr": 1e-4},
-            {"params": rest_params, "lr": 1e-4},  # or a different LR if you like
-        ]
-    )
+#     # (Optional) separate LR for fusion vs rest:
+#     fusion_params = list(model.patchify.fnet.parameters()) + list(model.patchify.inet.parameters())
+#     rest_params = [p for p in model.parameters() if p.requires_grad and p not in fusion_params]
+#     optimizer = torch.optim.Adam(
+#         [
+#             {"params": fusion_params, "lr": 1e-4},
+#             {"params": rest_params, "lr": 1e-4},  # or a different LR if you like
+#         ]
+#     )
 
-    # 4) Safety: if you ever call model.train() again (e.g., each epoch), re-pin mask2former to eval:
-    # model.train()
-    # model.patchify.mask2former.eval()
-    # for p in model.patchify.mask2former.parameters():
-    #     p.requires_grad_(False)
+#     # 4) Safety: if you ever call model.train() again (e.g., each epoch), re-pin mask2former to eval:
+#     # model.train()
+#     # model.patchify.mask2former.eval()
+#     # for p in model.patchify.mask2former.parameters():
+#     #     p.requires_grad_(False)
 
-    # 5) Gradient sanity check (optional)
-    dummy_images = torch.randn(1, 8, 3, 256, 320, device="cuda")
-    dummy_poses = SE3.IdentityLike(torch.zeros(1,8, device="cuda"))
-    dummy_disps = torch.ones(1, 8, 256, 320, device="cuda")
-    dummy_intr = torch.tensor([[[320., 0., 160.], [0., 320., 128.], [0., 0., 1.]]], device="cuda")
+#     # 5) Gradient sanity check (optional)
+#     dummy_images = torch.randn(1, 8, 3, 256, 320, device="cuda")
+#     dummy_poses = SE3.IdentityLike(torch.zeros(1,8, device="cuda"))
+#     dummy_disps = torch.ones(1, 8, 256, 320, device="cuda")
+#     dummy_intr = torch.tensor([[[320., 0., 160.], [0., 320., 128.], [0., 0., 1.]]], device="cuda")
 
-    model.cuda()
-    out = model(dummy_images, dummy_poses, dummy_disps, dummy_intr)  # your normal forward & loss path
-    loss = out[0][0].shape[0] * 0.001  # dummy loss
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
+#     model.cuda()
+#     out = model(dummy_images, dummy_poses, dummy_disps, dummy_intr)  # your normal forward & loss path
+#     loss = out[0][0].shape[0] * 0.001  # dummy loss
+#     loss.backward()
+#     optimizer.step()
+#     optimizer.zero_grad()
 
 
-    # assert any grad in fusion, none in mask2former
-    assert any(p.grad is not None for p in model.patchify.fnet.parameters()), "fnet not receiving grads"
-    assert any(p.grad is not None for p in model.patchify.inet.parameters()), "inet not receiving grads"
-    assert all(p.grad is None for p in model.patchify.mask2former.parameters()), "mask2former should be frozen"
+#     # assert any grad in fusion, none in mask2former
+#     assert any(p.grad is not None for p in model.patchify.fnet.parameters()), "fnet not receiving grads"
+#     assert any(p.grad is not None for p in model.patchify.inet.parameters()), "inet not receiving grads"
+#     assert all(p.grad is None for p in model.patchify.mask2former.parameters()), "mask2former should be frozen"

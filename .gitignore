@@ -171,3 +171,4 @@ thirdparty/*
 saved_trajectories
 dinov2-models
 seg_models
+datasets

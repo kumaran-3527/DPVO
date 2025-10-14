@@ -152,82 +152,47 @@ class Mask2Former(nn.Module):
         seg_outputs = self.seg_model(**inputs)
 
         panoptic_results = self.seg_processor.post_process_panoptic_segmentation(
-            seg_outputs, target_sizes=[(H, W)] * (B * N)
+            seg_outputs, target_sizes=[(H, W)] * (B * N), 
         )
 
         seg_maps = torch.stack([r["segmentation"] for r in panoptic_results], dim=0)  # (B*N, H, W)
-        seg_maps = seg_maps.view(B, N, H, W).to(torch.int32)
+        seg_maps = seg_maps.view(B, N, H, W).to(torch.int16)
 
         encoder_feature_maps = None
         if self.capture_encoder and self._encoder_out is not None:
             enc_obj = self._encoder_out
             encoder_feature_maps = enc_obj.feature_maps
 
-        return seg_maps, encoder_feature_maps
+        return seg_maps, encoder_feature_maps # Tuple of 4 (B*N,C,H/8,W/8)
     
 
 
-class BackBone(nn.Module):
-    """
-    Simple wrapper to combine Mask2Former backbone and feature fusion into single module.
-    """
-    def __init__(self, model_path: str = MODEL_PATH, device: str = 'cuda', eval: bool = True , capture_encoder: bool = True, fp_16 : bool = True, out_dim: int = 128 ) :
-        super().__init__()
 
-        self.device = device
+# if __name__ == "__main__" : 
 
-        self.mask2former = Mask2Former(model_path=model_path, device=device, eval=eval, capture_encoder=capture_encoder, fp_16=fp_16)
-        self.feat_fuser = SimpleFeatureFusion(out_dim=out_dim, c1_channels=96, c2_channels=192, c3_channels=384).to(device).half() if fp_16 else SimpleFeatureFusion(out_dim=out_dim, c1_channels=96, c2_channels=192, c3_channels=384).to(device)
-        self.fp_16 = fp_16
+    # from PIL import Image
+    # import numpy as np
+    # import time
 
-
-    def forward(self, x: torch.Tensor):
-        """Run panoptic segmentation and return (segmentation_maps, fused_encoder_features).
-
-        segmentation_maps: (B, N, H, W) integer map of segment ids
-        fused_encoder_features:  Fused encoder features from feature pyramid (B*N,D,H/8,W/8)
-        """
-        B, N, C, H, W = x.shape
-
-        with torch.cuda.amp.autocast(enabled=self.fp_16):
-            seg_maps, enc_feats = self.mask2former(x)  # (B,N,H,W), List of 4 feature maps [(B*N,C,H',W'),...]
-
-            if enc_feats is not None and len(enc_feats) >= 3:
-                fused_feats = self.feat_fuser(enc_feats[0], enc_feats[1], enc_feats[2], out_size=(x.shape[-2] // 8, x.shape[-1] // 8), interp_mode='bilinear')  # (B*N,D,H/8,W/8)
-            else:
-                fused_feats = None
-
-        seg_maps = seg_maps.view(B, N, H, W)
-        fused_feats = fused_feats.view(B, N, fused_feats.shape[1], fused_feats.shape[2], fused_feats.shape[3])
-        
-        return seg_maps, fused_feats
-
-
-if __name__ == "__main__" : 
-
-    from PIL import Image
-    import numpy as np
-    import time
-
-    image = Image.open("datasets/mono/ME002/000002.png").convert("RGB")
-    image = torch.from_numpy( np.array(image).astype('float32').transpose(2,0,1) / 255.0 )  # (3,H,W) in [0,1]
+    # image = Image.open("datasets/mono/ME002/000002.png").convert("RGB")
+    # image = torch.from_numpy( np.array(image).astype('float32').transpose(2,0,1) / 255.0 )  # (3,H,W) in [0,1]
     
-    model = BackBone(model_path=MODEL_PATH, device='cuda', eval=True, capture_encoder=True, fp_16=SEG_FP_16, out_dim=386)
-    x = image.unsqueeze(0).unsqueeze(0).to(model.device)
-    # Warmup 
-    for i in range(5):
-        with torch.no_grad():
-            seg_maps, enc_feats = model(x)
+    # model = BackBone(model_path=MODEL_PATH, device='cuda', eval=True, capture_encoder=True, fp_16=SEG_FP_16, out_dim=386)
+    # x = image.unsqueeze(0).unsqueeze(0).to(model.device)
+    # # Warmup 
+    # for i in range(5):
+    #     with torch.no_grad():
+    #         seg_maps, enc_feats = model(x)
 
 
-    start  = time.time()
-    with torch.no_grad():
-        seg_maps, fused_feats = model(x)
-    end = time.time()
-    print(f"Time taken: {(end-start)*1000:.1f} ms")
-    print(seg_maps.shape)  # (1, 1, 480, 640)
-    print(fused_feats.shape)  # (1, 1, 128, 60, 80)
+    # start  = time.time()
+    # with torch.no_grad():
+    #     seg_maps, fused_feats = model(x)
+    # end = time.time()
+    # print(f"Time taken: {(end-start)*1000:.1f} ms")
+    # print(seg_maps.shape)  # (1, 1, 480, 640)
+    # print(fused_feats.shape)  # (1, 1, 128, 60, 80)
 
-    torch.cuda.synchronize()
+    # torch.cuda.synchronize()
    
     
